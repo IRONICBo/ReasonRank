@@ -50,10 +50,36 @@ ENV_PYTHON="${CONDA_PREFIX}/bin/python"
 echo "Conda env path: ${CONDA_PREFIX}"
 echo "Using pip: ${ENV_PIP}"
 
-# ---------- 2. Install PyTorch (B200 / CUDA 12.8+) ----------
-echo "[2/6] Installing PyTorch with CUDA 12.8 support..."
+# ---------- 2. Install PyTorch (auto-detect CUDA version) ----------
+# Map driver CUDA version to the best available PyTorch cu index
+# CUDA 13.0 is backward compatible, use the highest available cu build
+if [ "$CUDA_MAJOR" -ge 13 ]; then
+    # CUDA 13.x: PyTorch nightly/latest may have cu130, fallback to cu128
+    # Check if cu130 index exists, otherwise use cu128 (forward compatible)
+    PYTORCH_CUDA_TAG="cu128"
+    # Try cu130 first
+    if ${ENV_PIP} index versions torch --index-url https://download.pytorch.org/whl/cu130 &>/dev/null 2>&1; then
+        PYTORCH_CUDA_TAG="cu130"
+    fi
+elif [ "$CUDA_MAJOR" -eq 12 ]; then
+    if [ "$CUDA_MINOR" -ge 8 ]; then
+        PYTORCH_CUDA_TAG="cu128"
+    elif [ "$CUDA_MINOR" -ge 6 ]; then
+        PYTORCH_CUDA_TAG="cu126"
+    elif [ "$CUDA_MINOR" -ge 4 ]; then
+        PYTORCH_CUDA_TAG="cu124"
+    else
+        PYTORCH_CUDA_TAG="cu121"
+    fi
+else
+    PYTORCH_CUDA_TAG="cu118"
+fi
+
+PYTORCH_INDEX="https://download.pytorch.org/whl/${PYTORCH_CUDA_TAG}"
+echo "[2/6] Installing PyTorch (CUDA ${CUDA_VERSION} -> ${PYTORCH_CUDA_TAG})..."
+echo "  Index: ${PYTORCH_INDEX}"
 echo "  This may take a while (downloading ~2GB)..."
-${ENV_PIP} install -v torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128 2>&1 | tail -20
+${ENV_PIP} install -v torch torchvision torchaudio --index-url ${PYTORCH_INDEX} 2>&1 | tail -20
 
 echo "Verifying PyTorch CUDA..."
 ${ENV_PYTHON} -c "
