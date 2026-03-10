@@ -39,7 +39,7 @@ else
     conda create -n ${ENV_NAME} python=${PYTHON_VERSION} -y
 fi
 
-CONDA_RUN="conda run -n ${ENV_NAME} --no-banner"
+CONDA_RUN="conda run -n ${ENV_NAME}"
 
 # ---------- 2. Install PyTorch (B200 / CUDA 12.8+) ----------
 echo "[2/6] Installing PyTorch with CUDA 12.8 support..."
