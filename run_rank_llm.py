@@ -15,7 +15,10 @@ from rerank.rank_listwise_os_llm import RankListwiseOSLLM
 from rerank.rankllm import PromptMode, RankLLM
 from rerank.reranker import Reranker
 from pyserini.search.lucene import LuceneSearcher
-from pyserini.search import FaissSearcher
+try:
+    from pyserini.search import FaissSearcher
+except ImportError:
+    FaissSearcher = None
 from pyserini.search._base import get_topics, get_qrels
 from utils import OutputFormat, get_output_writer, get_qrels_dl22, get_topics_dl22, get_topics_qrels_excluded_ids_for_bright, get_topics_qrels_for_r2med
 from dataclasses import dataclass, field
