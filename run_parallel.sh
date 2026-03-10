@@ -2,6 +2,8 @@
 # ============================================================
 # ReasonRank Data-Parallel Evaluation
 # Distributes datasets across GPUs, 1 model instance per GPU
+# Each GPU logs to wandb independently, then a final summary run
+# collects all results into one unified wandb run.
 #
 # Usage:
 #   bash run_parallel.sh                          # 8 GPUs, reasonrank-7B
@@ -120,7 +122,7 @@ echo "All ${#PIDS[@]} instances launched. Logs in: ${LOG_DIR}"
 echo "Waiting for all instances to finish..."
 echo "  Monitor: tail -f ${LOG_DIR}/*.log"
 
-# ===================== Wait and collect results =====================
+# ===================== Wait for all instances =====================
 FAILED=0
 for ((i=0; i<${#PIDS[@]}; i++)); do
     PID=${PIDS[$i]}
@@ -133,11 +135,27 @@ for ((i=0; i<${#PIDS[@]}; i++)); do
 done
 
 echo ""
-echo "============================================"
-if [ ${FAILED} -eq 0 ]; then
-    echo "  All instances completed successfully!"
-else
-    echo "  ${FAILED} instance(s) failed. Check logs: ${LOG_DIR}"
+if [ ${FAILED} -gt 0 ]; then
+    echo "WARNING: ${FAILED} instance(s) failed. Check logs: ${LOG_DIR}"
 fi
-echo "  Results saved in: results/"
+
+# ===================== Collect all results into one wandb summary run =====================
+echo "============================================"
+echo "  Collecting results into unified wandb run"
+echo "============================================"
+
+DATASETS_CSV=$(IFS=,; echo "${ALL_DATASETS[*]}")
+python wandb_summary.py \
+    --results_dir results \
+    --datasets ${ALL_DATASETS[@]} \
+    --model_path ${MODEL} \
+    --prompt_mode ${PROMPT_MODE} \
+    --num_gpus ${TOTAL_GPUS} \
+    --tp ${TP} \
+    --wandb_project ${WANDB_PROJECT} \
+    ${WANDB_ENTITY_ARG}
+
+echo ""
+echo "============================================"
+echo "  All done! Results in: results/"
 echo "============================================"
