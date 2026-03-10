@@ -124,7 +124,7 @@ def init_wandb(args):
     if torch.cuda.is_available():
         gpu_info['gpu_count'] = torch.cuda.device_count()
         gpu_info['gpu_names'] = [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())]
-        gpu_info['gpu_memory_gb'] = [round(torch.cuda.get_device_properties(i).total_mem / 1e9, 1) for i in range(torch.cuda.device_count())]
+        gpu_info['gpu_memory_gb'] = [round(torch.cuda.get_device_properties(i).total_memory / 1e9, 1) for i in range(torch.cuda.device_count())]
         gpu_info['cuda_version'] = torch.version.cuda
 
     config = {
