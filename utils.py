@@ -6,9 +6,15 @@ import json
 from rerank.rankllm import PromptMode
 from abc import ABC, abstractmethod
 from enum import Enum, unique
-from pyserini.search import JLuceneSearcherResult
+try:
+    from pyserini.search import JLuceneSearcherResult
+except ImportError:
+    JLuceneSearcherResult = Any  # pyserini >= 1.0 removed this class
 from config import WORKSPACE_DIR, PROJECT_DIR
-import faiss
+try:
+    import faiss
+except ImportError:
+    faiss = None
 import numpy as np
 from tqdm import tqdm
 
