@@ -36,8 +36,13 @@ def main():
         if not os.path.exists(result_path):
             missing.append(dataset)
             continue
-        with open(result_path, "r") as f:
-            records = json.load(f)
+        try:
+            with open(result_path, "r") as f:
+                records = json.load(f)
+        except (json.JSONDecodeError, Exception) as e:
+            print(f"WARNING: Failed to parse {result_path}: {e}, skipping")
+            missing.append(dataset)
+            continue
         # Take the latest record matching this model
         matched = [r for r in records if r.get("model_path") == args.model_path]
         if not matched:
