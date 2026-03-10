@@ -288,14 +288,24 @@ def evaluate_results(args, dataset, out_path, qrels, time_cost, current_pass, to
               **all_metrics}
     os.makedirs('results/', exist_ok=True)
     result_path = f'results/{dataset}.json'
-    if os.path.exists(result_path) == False:
-        with open(result_path, 'w') as f:
-            json.dump([], f, indent=4)
-    with open(result_path, 'r') as f:
-        json_data = json.load(f)
-        json_data.append(result)
-    with open(result_path, 'w') as f:
-        json.dump(json_data, f, indent=4)
+    lock_path = f'{result_path}.lock'
+    import fcntl
+    with open(lock_path, 'w') as lock_f:
+        fcntl.flock(lock_f, fcntl.LOCK_EX)
+        try:
+            if not os.path.exists(result_path):
+                json_data = []
+            else:
+                with open(result_path, 'r') as f:
+                    try:
+                        json_data = json.load(f)
+                    except json.JSONDecodeError:
+                        json_data = []
+            json_data.append(result)
+            with open(result_path, 'w') as f:
+                json.dump(json_data, f, indent=4)
+        finally:
+            fcntl.flock(lock_f, fcntl.LOCK_UN)
 
     # Log to wandb
     log_dataset_results_to_wandb(wandb_run, args, dataset, all_metrics, time_cost, current_pass, total_input_tokens, total_output_tokens)
