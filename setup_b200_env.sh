@@ -39,14 +39,24 @@ else
     conda create -n ${ENV_NAME} python=${PYTHON_VERSION} -y
 fi
 
-CONDA_RUN="conda run -n ${ENV_NAME}"
+# Get the conda env's pip/python path directly to avoid conda run buffering
+CONDA_PREFIX=$(conda info --envs | grep "^${ENV_NAME} " | awk '{print $NF}')
+if [ -z "${CONDA_PREFIX}" ]; then
+    CONDA_PREFIX=$(conda info --envs | grep "^${ENV_NAME} " | awk '{print $2}')
+fi
+ENV_PIP="${CONDA_PREFIX}/bin/pip"
+ENV_PYTHON="${CONDA_PREFIX}/bin/python"
+
+echo "Conda env path: ${CONDA_PREFIX}"
+echo "Using pip: ${ENV_PIP}"
 
 # ---------- 2. Install PyTorch (B200 / CUDA 12.8+) ----------
 echo "[2/6] Installing PyTorch with CUDA 12.8 support..."
-${CONDA_RUN} pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+echo "  This may take a while (downloading ~2GB)..."
+${ENV_PIP} install -v torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128 2>&1 | tail -20
 
 echo "Verifying PyTorch CUDA..."
-${CONDA_RUN} python -c "
+${ENV_PYTHON} -c "
 import torch
 print(f'PyTorch version: {torch.__version__}')
 print(f'CUDA available: {torch.cuda.is_available()}')
@@ -58,12 +68,12 @@ if torch.cuda.is_available():
 
 # ---------- 3. Install vLLM ----------
 echo "[3/6] Installing vLLM..."
-${CONDA_RUN} pip install vllm
+${ENV_PIP} install -v vllm 2>&1 | tail -20
 
 # ---------- 4. Install core dependencies ----------
 echo "[4/6] Installing core dependencies..."
-${CONDA_RUN} pip install \
-    transformers>=4.45.0 \
+${ENV_PIP} install -v \
+    "transformers>=4.45.0" \
     datasets \
     accelerate \
     pyserini \
@@ -76,7 +86,7 @@ ${CONDA_RUN} pip install \
     pandas \
     numpy \
     tqdm \
-    huggingface_hub
+    huggingface_hub 2>&1 | tail -20
 
 # ---------- 5. Install JDK for pyserini ----------
 echo "[5/6] Checking Java for pyserini..."
@@ -90,7 +100,7 @@ fi
 # ---------- 6. wandb login ----------
 echo "[6/6] Setting up wandb..."
 if [ -n "${WANDB_API_KEY}" ]; then
-    ${CONDA_RUN} wandb login --relogin ${WANDB_API_KEY}
+    ${CONDA_PREFIX}/bin/wandb login --relogin ${WANDB_API_KEY}
     echo "wandb logged in."
 else
     echo "WANDB_API_KEY not set. Run 'wandb login' after activating the environment."
