@@ -28,6 +28,13 @@ from config import WORKSPACE_DIR, PROJECT_DIR
 import random
 from datasets import load_dataset
 
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+    print("WARNING: wandb not installed. Run `pip install wandb` to enable logging.")
+
 os.environ["PYSERINI_CACHE"] = "../../cache"
 os.environ['TORCH_USE_CUDA_DSA'] = "1"
 
@@ -92,6 +99,145 @@ class Arguments:
     prompt_info_path: str = field(default=f'{PROJECT_DIR}/listwise_prompt_r1.toml')
     notes: str = field(default='', metadata={'help': 'notes for code running'})
 
+    # wandb arguments
+    wandb_project: str = field(default='ReasonRank', metadata={'help': 'wandb project name'})
+    wandb_entity: Optional[str] = field(default=None, metadata={'help': 'wandb entity (team/user)'})
+    wandb_run_name: Optional[str] = field(default=None, metadata={'help': 'wandb run name, auto-generated if not set'})
+    wandb_disabled: bool = field(default=False, metadata={'help': 'disable wandb logging'})
+
+
+def init_wandb(args):
+    """Initialize wandb run with full config."""
+    if not WANDB_AVAILABLE or args.wandb_disabled:
+        return None
+
+    run_name = args.wandb_run_name
+    if run_name is None:
+        model_short = args.model_path.split('/')[-1]
+        datasets_str = '_'.join(args.datasets[:3])
+        if len(args.datasets) > 3:
+            datasets_str += f'_+{len(args.datasets)-3}more'
+        run_name = f"{model_short}_{datasets_str}_{datetime.datetime.now().strftime('%m%d_%H%M')}"
+
+    # Collect GPU info
+    gpu_info = {}
+    if torch.cuda.is_available():
+        gpu_info['gpu_count'] = torch.cuda.device_count()
+        gpu_info['gpu_names'] = [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())]
+        gpu_info['gpu_memory_gb'] = [round(torch.cuda.get_device_properties(i).total_mem / 1e9, 1) for i in range(torch.cuda.device_count())]
+        gpu_info['cuda_version'] = torch.version.cuda
+
+    config = {
+        # model config
+        'model_path': args.model_path,
+        'lora_path': args.lora_path,
+        'context_size': args.context_size,
+        'llm_dtype': args.llm_dtype,
+        'num_gpus': args.num_gpus,
+        'prompt_mode': str(args.prompt_mode),
+        # retrieval config
+        'retrieval_method': str(args.retrieval_method),
+        'retrieval_num': args.retrieval_num,
+        'rerank_topk': args.rerank_topk,
+        # reranking config
+        'window_size': args.window_size,
+        'step_size': args.step_size,
+        'num_passes': args.num_passes,
+        'batch_size': args.batch_size,
+        'vllm_batched': args.vllm_batched,
+        'reasoning_maxlen': args.reasoning_maxlen,
+        'shuffle_candidates': args.shuffle_candidates,
+        # datasets
+        'datasets': args.datasets,
+        'num_datasets': len(args.datasets),
+        # misc
+        'notes': args.notes,
+        **gpu_info,
+    }
+
+    run = wandb.init(
+        project=args.wandb_project,
+        entity=args.wandb_entity,
+        name=run_name,
+        config=config,
+        tags=[args.model_path.split('/')[-1], str(args.retrieval_method)],
+    )
+    return run
+
+
+def log_dataset_results_to_wandb(wandb_run, args, dataset, all_metrics, time_cost, current_pass, total_input_tokens, total_output_tokens):
+    """Log per-dataset evaluation results to wandb."""
+    if wandb_run is None:
+        return
+
+    # Log per-dataset metrics with dataset prefix
+    metrics = {}
+    for metric_name, metric_value in all_metrics.items():
+        metrics[f"{dataset}/{metric_name}"] = float(metric_value)
+
+    # Log timing and token usage per dataset
+    metrics[f"{dataset}/time_cost_s"] = time_cost
+    metrics[f"{dataset}/total_input_tokens"] = total_input_tokens
+    metrics[f"{dataset}/total_output_tokens"] = total_output_tokens
+    metrics[f"{dataset}/total_tokens"] = total_input_tokens + total_output_tokens
+    metrics[f"{dataset}/pass"] = current_pass
+
+    wandb_run.log(metrics)
+
+
+def log_summary_to_wandb(wandb_run, all_dataset_metrics):
+    """Log aggregated summary across all datasets."""
+    if wandb_run is None or not all_dataset_metrics:
+        return
+
+    # Build a wandb Table for the full results
+    columns = ["dataset", "NDCG@1", "NDCG@5", "NDCG@10", "time_cost_s", "input_tokens", "output_tokens"]
+    table = wandb.Table(columns=columns)
+
+    ndcg1_values = []
+    ndcg5_values = []
+    ndcg10_values = []
+    total_time = 0
+    total_input = 0
+    total_output = 0
+
+    for ds_name, ds_info in all_dataset_metrics.items():
+        metrics = ds_info['metrics']
+        ndcg1 = float(metrics.get('NDCG@1', 0))
+        ndcg5 = float(metrics.get('NDCG@5', 0))
+        ndcg10 = float(metrics.get('NDCG@10', 0))
+        t_cost = ds_info['time_cost']
+        in_tok = ds_info['input_tokens']
+        out_tok = ds_info['output_tokens']
+
+        table.add_data(ds_name, ndcg1, ndcg5, ndcg10, t_cost, in_tok, out_tok)
+        ndcg1_values.append(ndcg1)
+        ndcg5_values.append(ndcg5)
+        ndcg10_values.append(ndcg10)
+        total_time += t_cost
+        total_input += in_tok
+        total_output += out_tok
+
+    # Log the table
+    wandb_run.log({"results_table": table})
+
+    # Log aggregated summary metrics
+    import numpy as np
+    summary = {
+        "summary/avg_NDCG@1": np.mean(ndcg1_values),
+        "summary/avg_NDCG@5": np.mean(ndcg5_values),
+        "summary/avg_NDCG@10": np.mean(ndcg10_values),
+        "summary/total_time_s": total_time,
+        "summary/total_input_tokens": total_input,
+        "summary/total_output_tokens": total_output,
+        "summary/total_tokens": total_input + total_output,
+        "summary/num_datasets": len(all_dataset_metrics),
+    }
+    wandb_run.log(summary)
+
+    # Also set wandb summary for easy comparison
+    for k, v in summary.items():
+        wandb_run.summary[k] = v
 
 
 def write_run(output_writer, results, args):
@@ -117,7 +263,7 @@ def write_run(output_writer, results, args):
             # write results
             output_writer.write(qid, hits)
 
-def evaluate_results(args, dataset, out_path, qrels, time_cost, current_pass, total_input_tokens, total_output_tokens):
+def evaluate_results(args, dataset, out_path, qrels, time_cost, current_pass, total_input_tokens, total_output_tokens, wandb_run=None):
     all_metrics = Eval(out_path, qrels)
     print(f'###################### {dataset} ######################')
     print(all_metrics)
@@ -140,13 +286,18 @@ def evaluate_results(args, dataset, out_path, qrels, time_cost, current_pass, to
     os.makedirs('results/', exist_ok=True)
     result_path = f'results/{dataset}.json'
     if os.path.exists(result_path) == False:
-        with open(result_path, 'w') as f: 
+        with open(result_path, 'w') as f:
             json.dump([], f, indent=4)
     with open(result_path, 'r') as f:
         json_data = json.load(f)
         json_data.append(result)
-    with open(result_path, 'w') as f: 
+    with open(result_path, 'w') as f:
         json.dump(json_data, f, indent=4)
+
+    # Log to wandb
+    log_dataset_results_to_wandb(wandb_run, args, dataset, all_metrics, time_cost, current_pass, total_input_tokens, total_output_tokens)
+
+    return all_metrics
 
 
 
@@ -155,6 +306,9 @@ if __name__ == "__main__":
     parser = HfArgumentParser(Arguments)
     _args, *_ = parser.parse_args_into_dataclasses()
     args = argparse.Namespace(**vars(_args))
+
+    # Initialize wandb
+    wandb_run = init_wandb(args)
 
     ############################## retrieval for each dataset ##############################
     dataset_qrels = {}
@@ -274,6 +428,7 @@ if __name__ == "__main__":
         )
     reranker = Reranker(agent)
     ###################################### Reranking ######################################
+    all_dataset_metrics = {}  # collect for wandb summary
     for dataset in args.datasets:
         print(f"########################## Reranking on {dataset} ##########################")
         qrels = dataset_qrels[dataset]
@@ -315,10 +470,25 @@ if __name__ == "__main__":
             write_run(output_writer, reranked_results, args)
             total_input_tokens = sum(summary.input_token_count for result in reranked_results for summary in result.ranking_exec_summary)
             total_output_tokens = sum(summary.output_token_count for result in reranked_results for summary in result.ranking_exec_summary)
-            evaluate_results(args, dataset, out_path, qrels, time_cost = total_time_cost, current_pass=pass_ct+1, total_input_tokens=total_input_tokens, total_output_tokens=total_output_tokens)
+            ds_metrics = evaluate_results(args, dataset, out_path, qrels, time_cost=total_time_cost, current_pass=pass_ct+1,
+                                          total_input_tokens=total_input_tokens, total_output_tokens=total_output_tokens,
+                                          wandb_run=wandb_run)
             if args.num_passes > 1:
                 results = [
                     Request(copy.deepcopy(r.query), copy.deepcopy(r.candidates))
                     for r in reranked_results
                 ]
+        # Store final pass metrics for summary
+        all_dataset_metrics[dataset] = {
+            'metrics': ds_metrics,
+            'time_cost': total_time_cost,
+            'input_tokens': total_input_tokens,
+            'output_tokens': total_output_tokens,
+        }
         print(f"Reranking with {args.num_passes} passes complete!")
+
+    # Log aggregated summary to wandb and finish
+    log_summary_to_wandb(wandb_run, all_dataset_metrics)
+    if wandb_run is not None:
+        wandb_run.finish()
+        print(f"wandb run finished: {wandb_run.url}")
