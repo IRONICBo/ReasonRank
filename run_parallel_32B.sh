@@ -6,7 +6,7 @@
 
 export MODEL="liuwenhan/reasonrank-32B"
 export PROMPT_MODE="rank_GPT_reasoning"
-export TP=4          # 32B needs 4 GPUs per instance
-export NUM_GPUS=8    # total GPUs -> 2 instances
+export TP=1          # B200 192GB, 32B (~64GB bf16) fits on 1 GPU
+export NUM_GPUS=8    # total GPUs -> 8 instances
 
 bash "$(dirname $0)/run_parallel.sh"
