@@ -77,8 +77,11 @@ def main():
     # Log per-dataset metrics
     ndcg1_list, ndcg5_list, ndcg10_list = [], [], []
     total_time, total_input_tokens, total_output_tokens = 0, 0, 0
+    all_cot_words, all_answer_words = [], []
 
-    columns = ["dataset", "NDCG@1", "NDCG@5", "NDCG@10", "time_cost_s", "input_tokens", "output_tokens"]
+    columns = ["dataset", "NDCG@1", "NDCG@5", "NDCG@10", "time_cost_s",
+               "input_tokens", "output_tokens", "avg_input_tok", "avg_output_tok",
+               "avg_cot_words", "max_cot_words", "avg_answer_words"]
     table = wandb.Table(columns=columns)
 
     for dataset, result in all_results.items():
@@ -88,6 +91,11 @@ def main():
         t_cost = result.get("time_cost", 0)
         in_tok = result.get("total_input_tokens", 0)
         out_tok = result.get("total_output_tokens", 0)
+        avg_in = result.get("avg_input_tokens", 0)
+        avg_out = result.get("avg_output_tokens", 0)
+        avg_cot = result.get("avg_cot_words", 0)
+        max_cot = result.get("max_cot_words", 0)
+        avg_ans = result.get("avg_answer_words", 0)
 
         # Per-dataset metrics
         run.log({
@@ -97,17 +105,26 @@ def main():
             f"{dataset}/time_cost_s": t_cost,
             f"{dataset}/input_tokens": in_tok,
             f"{dataset}/output_tokens": out_tok,
+            f"{dataset}/avg_input_tokens": avg_in,
+            f"{dataset}/avg_output_tokens": avg_out,
+            f"{dataset}/avg_cot_words": avg_cot,
+            f"{dataset}/max_cot_words": max_cot,
+            f"{dataset}/avg_answer_words": avg_ans,
         })
 
-        table.add_data(dataset, ndcg1, ndcg5, ndcg10, t_cost, in_tok, out_tok)
+        table.add_data(dataset, ndcg1, ndcg5, ndcg10, t_cost, in_tok, out_tok,
+                       avg_in, avg_out, avg_cot, max_cot, avg_ans)
         ndcg1_list.append(ndcg1)
         ndcg5_list.append(ndcg5)
         ndcg10_list.append(ndcg10)
         total_time += t_cost
         total_input_tokens += in_tok
         total_output_tokens += out_tok
+        if avg_cot > 0:
+            all_cot_words.append(avg_cot)
+            all_answer_words.append(avg_ans)
 
-        print(f"  {dataset}: NDCG@1={ndcg1} NDCG@5={ndcg5} NDCG@10={ndcg10} time={t_cost:.1f}s")
+        print(f"  {dataset}: NDCG@1={ndcg1} NDCG@5={ndcg5} NDCG@10={ndcg10} time={t_cost:.1f}s cot={avg_cot:.0f}w ans={avg_ans:.0f}w")
 
     # Log table
     run.log({"results_table": table})
@@ -122,6 +139,8 @@ def main():
         "summary/total_output_tokens": total_output_tokens,
         "summary/total_tokens": total_input_tokens + total_output_tokens,
         "summary/num_datasets_completed": len(all_results),
+        "summary/avg_cot_words": np.mean(all_cot_words) if all_cot_words else 0,
+        "summary/avg_answer_words": np.mean(all_answer_words) if all_answer_words else 0,
     }
     run.log(summary)
     for k, v in summary.items():

@@ -38,6 +38,73 @@ except ImportError:
     WANDB_AVAILABLE = False
     print("WARNING: wandb not installed. Run `pip install wandb` to enable logging.")
 
+import re
+import numpy as np
+
+
+def parse_cot_answer_lengths(response: str):
+    """Parse a response to extract CoT (think) and answer character/word lengths."""
+    cot_text = ""
+    answer_text = ""
+
+    # Extract <think>...</think>
+    think_match = re.search(r'<think>(.*?)</think>', response, re.DOTALL)
+    if think_match:
+        cot_text = think_match.group(1).strip()
+
+    # Extract <answer>...</answer>
+    answer_match = re.search(r'<answer>(.*?)</answer>', response, re.DOTALL)
+    if answer_match:
+        answer_text = answer_match.group(1).strip()
+
+    return {
+        'cot_chars': len(cot_text),
+        'cot_words': len(cot_text.split()) if cot_text else 0,
+        'answer_chars': len(answer_text),
+        'answer_words': len(answer_text.split()) if answer_text else 0,
+        'total_chars': len(response),
+    }
+
+
+def compute_generation_stats(reranked_results):
+    """Compute input/output/cot/answer token and length statistics from reranked results."""
+    total_input_tokens = 0
+    total_output_tokens = 0
+    cot_chars_list = []
+    cot_words_list = []
+    answer_chars_list = []
+    answer_words_list = []
+    input_token_list = []
+    output_token_list = []
+
+    for result in reranked_results:
+        for summary in result.ranking_exec_summary:
+            total_input_tokens += summary.input_token_count
+            total_output_tokens += summary.output_token_count
+            input_token_list.append(summary.input_token_count)
+            output_token_list.append(summary.output_token_count)
+
+            lengths = parse_cot_answer_lengths(summary.response)
+            cot_chars_list.append(lengths['cot_chars'])
+            cot_words_list.append(lengths['cot_words'])
+            answer_chars_list.append(lengths['answer_chars'])
+            answer_words_list.append(lengths['answer_words'])
+
+    stats = {
+        'total_input_tokens': total_input_tokens,
+        'total_output_tokens': total_output_tokens,
+        'avg_input_tokens': np.mean(input_token_list) if input_token_list else 0,
+        'avg_output_tokens': np.mean(output_token_list) if output_token_list else 0,
+        'avg_cot_chars': np.mean(cot_chars_list) if cot_chars_list else 0,
+        'avg_cot_words': np.mean(cot_words_list) if cot_words_list else 0,
+        'max_cot_words': max(cot_words_list) if cot_words_list else 0,
+        'min_cot_words': min(cot_words_list) if cot_words_list else 0,
+        'avg_answer_chars': np.mean(answer_chars_list) if answer_chars_list else 0,
+        'avg_answer_words': np.mean(answer_words_list) if answer_words_list else 0,
+        'num_prompts': len(input_token_list),
+    }
+    return stats
+
 os.environ["PYSERINI_CACHE"] = "../../cache"
 os.environ['TORCH_USE_CUDA_DSA'] = "1"
 
@@ -168,10 +235,13 @@ def init_wandb(args):
     return run
 
 
-def log_dataset_results_to_wandb(wandb_run, args, dataset, all_metrics, time_cost, current_pass, total_input_tokens, total_output_tokens):
+def log_dataset_results_to_wandb(wandb_run, args, dataset, all_metrics, time_cost, current_pass, gen_stats):
     """Log per-dataset evaluation results to wandb."""
     if wandb_run is None:
         return
+
+    total_input_tokens = gen_stats['total_input_tokens']
+    total_output_tokens = gen_stats['total_output_tokens']
 
     # Log per-dataset metrics with dataset prefix
     metrics = {}
@@ -185,6 +255,15 @@ def log_dataset_results_to_wandb(wandb_run, args, dataset, all_metrics, time_cos
     metrics[f"{dataset}/total_tokens"] = total_input_tokens + total_output_tokens
     metrics[f"{dataset}/pass"] = current_pass
 
+    # Log CoT and answer length stats
+    metrics[f"{dataset}/avg_input_tokens"] = gen_stats['avg_input_tokens']
+    metrics[f"{dataset}/avg_output_tokens"] = gen_stats['avg_output_tokens']
+    metrics[f"{dataset}/avg_cot_words"] = gen_stats['avg_cot_words']
+    metrics[f"{dataset}/max_cot_words"] = gen_stats['max_cot_words']
+    metrics[f"{dataset}/min_cot_words"] = gen_stats['min_cot_words']
+    metrics[f"{dataset}/avg_answer_words"] = gen_stats['avg_answer_words']
+    metrics[f"{dataset}/num_prompts"] = gen_stats['num_prompts']
+
     wandb_run.log(metrics)
 
 
@@ -194,18 +273,18 @@ def log_summary_to_wandb(wandb_run, all_dataset_metrics):
         return
 
     # Build a wandb Table for the full results
-    columns = ["dataset", "NDCG@1", "NDCG@5", "NDCG@10", "time_cost_s", "input_tokens", "output_tokens"]
+    columns = ["dataset", "NDCG@1", "NDCG@5", "NDCG@10", "time_cost_s",
+               "input_tokens", "output_tokens", "avg_input_tok", "avg_output_tok",
+               "avg_cot_words", "max_cot_words", "avg_answer_words", "num_prompts"]
     table = wandb.Table(columns=columns)
 
-    ndcg1_values = []
-    ndcg5_values = []
-    ndcg10_values = []
-    total_time = 0
-    total_input = 0
-    total_output = 0
+    ndcg1_values, ndcg5_values, ndcg10_values = [], [], []
+    total_time, total_input, total_output = 0, 0, 0
+    all_cot_words, all_answer_words = [], []
 
     for ds_name, ds_info in all_dataset_metrics.items():
         metrics = ds_info['metrics']
+        gs = ds_info.get('gen_stats', {})
         ndcg1 = float(metrics.get('NDCG@1', 0))
         ndcg5 = float(metrics.get('NDCG@5', 0))
         ndcg10 = float(metrics.get('NDCG@10', 0))
@@ -213,19 +292,28 @@ def log_summary_to_wandb(wandb_run, all_dataset_metrics):
         in_tok = ds_info['input_tokens']
         out_tok = ds_info['output_tokens']
 
-        table.add_data(ds_name, ndcg1, ndcg5, ndcg10, t_cost, in_tok, out_tok)
+        table.add_data(ds_name, ndcg1, ndcg5, ndcg10, t_cost, in_tok, out_tok,
+                       round(gs.get('avg_input_tokens', 0), 1),
+                       round(gs.get('avg_output_tokens', 0), 1),
+                       round(gs.get('avg_cot_words', 0), 1),
+                       gs.get('max_cot_words', 0),
+                       round(gs.get('avg_answer_words', 0), 1),
+                       gs.get('num_prompts', 0))
+
         ndcg1_values.append(ndcg1)
         ndcg5_values.append(ndcg5)
         ndcg10_values.append(ndcg10)
         total_time += t_cost
         total_input += in_tok
         total_output += out_tok
+        if gs.get('avg_cot_words', 0) > 0:
+            all_cot_words.append(gs['avg_cot_words'])
+            all_answer_words.append(gs['avg_answer_words'])
 
     # Log the table
     wandb_run.log({"results_table": table})
 
     # Log aggregated summary metrics
-    import numpy as np
     summary = {
         "summary/avg_NDCG@1": np.mean(ndcg1_values),
         "summary/avg_NDCG@5": np.mean(ndcg5_values),
@@ -235,6 +323,8 @@ def log_summary_to_wandb(wandb_run, all_dataset_metrics):
         "summary/total_output_tokens": total_output,
         "summary/total_tokens": total_input + total_output,
         "summary/num_datasets": len(all_dataset_metrics),
+        "summary/avg_cot_words": np.mean(all_cot_words) if all_cot_words else 0,
+        "summary/avg_answer_words": np.mean(all_answer_words) if all_answer_words else 0,
     }
     wandb_run.log(summary)
 
@@ -266,11 +356,13 @@ def write_run(output_writer, results, args):
             # write results
             output_writer.write(qid, hits)
 
-def evaluate_results(args, dataset, out_path, qrels, time_cost, current_pass, total_input_tokens, total_output_tokens, wandb_run=None):
+def evaluate_results(args, dataset, out_path, qrels, time_cost, current_pass, gen_stats, wandb_run=None):
     all_metrics = Eval(out_path, qrels)
     print(f'###################### {dataset} ######################')
     print(all_metrics)
     print(f'time_cost: {time_cost}')
+    print(f'avg_input_tokens: {gen_stats["avg_input_tokens"]:.0f}, avg_output_tokens: {gen_stats["avg_output_tokens"]:.0f}')
+    print(f'avg_cot_words: {gen_stats["avg_cot_words"]:.0f} (min={gen_stats["min_cot_words"]}, max={gen_stats["max_cot_words"]}), avg_answer_words: {gen_stats["avg_answer_words"]:.0f}')
     result = {'model_path': args.model_path,
               'lora_path': args.lora_path,
               'datetime': str(datetime.datetime.now()),
@@ -282,8 +374,15 @@ def evaluate_results(args, dataset, out_path, qrels, time_cost, current_pass, to
               'step_size': args.step_size,
               'shuffle_candidates': args.shuffle_candidates,
               'time_cost': time_cost,
-              'total_input_tokens': total_input_tokens,
-              'total_output_tokens': total_output_tokens,
+              'total_input_tokens': gen_stats['total_input_tokens'],
+              'total_output_tokens': gen_stats['total_output_tokens'],
+              'avg_input_tokens': round(gen_stats['avg_input_tokens'], 1),
+              'avg_output_tokens': round(gen_stats['avg_output_tokens'], 1),
+              'avg_cot_words': round(gen_stats['avg_cot_words'], 1),
+              'max_cot_words': gen_stats['max_cot_words'],
+              'min_cot_words': gen_stats['min_cot_words'],
+              'avg_answer_words': round(gen_stats['avg_answer_words'], 1),
+              'num_prompts': gen_stats['num_prompts'],
               'notes': args.notes,
               **all_metrics}
     os.makedirs('results/', exist_ok=True)
@@ -308,7 +407,7 @@ def evaluate_results(args, dataset, out_path, qrels, time_cost, current_pass, to
             fcntl.flock(lock_f, fcntl.LOCK_UN)
 
     # Log to wandb
-    log_dataset_results_to_wandb(wandb_run, args, dataset, all_metrics, time_cost, current_pass, total_input_tokens, total_output_tokens)
+    log_dataset_results_to_wandb(wandb_run, args, dataset, all_metrics, time_cost, current_pass, gen_stats)
 
     return all_metrics
 
@@ -481,11 +580,9 @@ if __name__ == "__main__":
             output_writer = get_output_writer(out_path, OutputFormat(args.output_format), 'w',
                                                 max_hits=args.retrieval_num, tag=args.retrieval_method, topics=topics, )
             write_run(output_writer, reranked_results, args)
-            total_input_tokens = sum(summary.input_token_count for result in reranked_results for summary in result.ranking_exec_summary)
-            total_output_tokens = sum(summary.output_token_count for result in reranked_results for summary in result.ranking_exec_summary)
+            gen_stats = compute_generation_stats(reranked_results)
             ds_metrics = evaluate_results(args, dataset, out_path, qrels, time_cost=total_time_cost, current_pass=pass_ct+1,
-                                          total_input_tokens=total_input_tokens, total_output_tokens=total_output_tokens,
-                                          wandb_run=wandb_run)
+                                          gen_stats=gen_stats, wandb_run=wandb_run)
             if args.num_passes > 1:
                 results = [
                     Request(copy.deepcopy(r.query), copy.deepcopy(r.candidates))
@@ -495,8 +592,9 @@ if __name__ == "__main__":
         all_dataset_metrics[dataset] = {
             'metrics': ds_metrics,
             'time_cost': total_time_cost,
-            'input_tokens': total_input_tokens,
-            'output_tokens': total_output_tokens,
+            'input_tokens': gen_stats['total_input_tokens'],
+            'output_tokens': gen_stats['total_output_tokens'],
+            'gen_stats': gen_stats,
         }
         print(f"Reranking with {args.num_passes} passes complete!")
 
