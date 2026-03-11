@@ -42,6 +42,50 @@ import re
 import numpy as np
 
 
+def save_detailed_results(reranked_results, args, dataset, wandb_run=None):
+    """Save complete prompt/response details to JSONL file and upload to wandb as artifact."""
+    model_short = args.model_path.split('/')[-1]
+    details_dir = os.path.join('runs', dataset)
+    os.makedirs(details_dir, exist_ok=True)
+    details_path = os.path.join(details_dir, f'{model_short}_details.jsonl')
+
+    records = []
+    for result in reranked_results:
+        for i, exec_info in enumerate(result.ranking_exec_summary):
+            cot_stats = parse_cot_answer_lengths(exec_info.response)
+            record = {
+                'qid': result.query.qid,
+                'query': result.query.text,
+                'window_idx': i,
+                'prompt': exec_info.prompt if isinstance(exec_info.prompt, str) else str(exec_info.prompt),
+                'response': exec_info.response,
+                'input_tokens': exec_info.input_token_count,
+                'output_tokens': exec_info.output_token_count,
+                'cot_words': cot_stats['cot_words'],
+                'answer_words': cot_stats['answer_words'],
+                'total_output_words': len(exec_info.response.split()) if exec_info.response else 0,
+            }
+            records.append(record)
+
+    with open(details_path, 'w') as f:
+        for record in records:
+            f.write(json.dumps(record, ensure_ascii=False) + '\n')
+    print(f"  Saved {len(records)} detailed records to {details_path}")
+
+    # Upload to wandb as artifact
+    if wandb_run is not None:
+        artifact = wandb.Artifact(
+            name=f"{model_short}_{dataset}_details",
+            type="eval_details",
+            description=f"Complete prompt/response details for {model_short} on {dataset}",
+        )
+        artifact.add_file(details_path)
+        wandb_run.log_artifact(artifact)
+        print(f"  Uploaded artifact to wandb: {model_short}_{dataset}_details")
+
+    return details_path
+
+
 def parse_cot_answer_lengths(response: str):
     """Parse a response to extract CoT (think) and answer character/word lengths."""
     cot_text = ""
@@ -90,6 +134,12 @@ def compute_generation_stats(reranked_results):
             answer_chars_list.append(lengths['answer_chars'])
             answer_words_list.append(lengths['answer_words'])
 
+    # Track total output word count (useful for non-CoT models too)
+    output_words_list = []
+    for result in reranked_results:
+        for summary in result.ranking_exec_summary:
+            output_words_list.append(len(summary.response.split()) if summary.response else 0)
+
     stats = {
         'total_input_tokens': total_input_tokens,
         'total_output_tokens': total_output_tokens,
@@ -101,6 +151,8 @@ def compute_generation_stats(reranked_results):
         'min_cot_words': min(cot_words_list) if cot_words_list else 0,
         'avg_answer_chars': np.mean(answer_chars_list) if answer_chars_list else 0,
         'avg_answer_words': np.mean(answer_words_list) if answer_words_list else 0,
+        'avg_output_words': np.mean(output_words_list) if output_words_list else 0,
+        'max_output_words': max(output_words_list) if output_words_list else 0,
         'num_prompts': len(input_token_list),
     }
     return stats
@@ -263,6 +315,8 @@ def log_dataset_results_to_wandb(wandb_run, args, dataset, all_metrics, time_cos
     metrics[f"{dataset}/max_cot_words"] = gen_stats['max_cot_words']
     metrics[f"{dataset}/min_cot_words"] = gen_stats['min_cot_words']
     metrics[f"{dataset}/avg_answer_words"] = gen_stats['avg_answer_words']
+    metrics[f"{dataset}/avg_output_words"] = gen_stats.get('avg_output_words', 0)
+    metrics[f"{dataset}/max_output_words"] = gen_stats.get('max_output_words', 0)
     metrics[f"{dataset}/num_prompts"] = gen_stats['num_prompts']
 
     wandb_run.log(metrics)
@@ -276,7 +330,7 @@ def log_summary_to_wandb(wandb_run, all_dataset_metrics):
     # Build a wandb Table for the full results
     columns = ["dataset", "NDCG@1", "NDCG@5", "NDCG@10", "time_cost_s",
                "input_tokens", "output_tokens", "avg_input_tok", "avg_output_tok",
-               "avg_cot_words", "max_cot_words", "avg_answer_words", "num_prompts"]
+               "avg_output_words", "avg_cot_words", "max_cot_words", "avg_answer_words", "num_prompts"]
     table = wandb.Table(columns=columns)
 
     ndcg1_values, ndcg5_values, ndcg10_values = [], [], []
@@ -296,6 +350,7 @@ def log_summary_to_wandb(wandb_run, all_dataset_metrics):
         table.add_data(ds_name, ndcg1, ndcg5, ndcg10, t_cost, in_tok, out_tok,
                        round(gs.get('avg_input_tokens', 0), 1),
                        round(gs.get('avg_output_tokens', 0), 1),
+                       round(gs.get('avg_output_words', 0), 1),
                        round(gs.get('avg_cot_words', 0), 1),
                        gs.get('max_cot_words', 0),
                        round(gs.get('avg_answer_words', 0), 1),
@@ -363,7 +418,7 @@ def evaluate_results(args, dataset, out_path, qrels, time_cost, current_pass, ge
     print(all_metrics)
     print(f'time_cost: {time_cost}')
     print(f'avg_input_tokens: {gen_stats["avg_input_tokens"]:.0f}, avg_output_tokens: {gen_stats["avg_output_tokens"]:.0f}')
-    print(f'avg_cot_words: {gen_stats["avg_cot_words"]:.0f} (min={gen_stats["min_cot_words"]}, max={gen_stats["max_cot_words"]}), avg_answer_words: {gen_stats["avg_answer_words"]:.0f}')
+    print(f'avg_output_words: {gen_stats["avg_output_words"]:.0f}, avg_cot_words: {gen_stats["avg_cot_words"]:.0f} (min={gen_stats["min_cot_words"]}, max={gen_stats["max_cot_words"]}), avg_answer_words: {gen_stats["avg_answer_words"]:.0f}')
     result = {'model_path': args.model_path,
               'lora_path': args.lora_path,
               'datetime': str(datetime.datetime.now()),
@@ -383,6 +438,8 @@ def evaluate_results(args, dataset, out_path, qrels, time_cost, current_pass, ge
               'max_cot_words': gen_stats['max_cot_words'],
               'min_cot_words': gen_stats['min_cot_words'],
               'avg_answer_words': round(gen_stats['avg_answer_words'], 1),
+              'avg_output_words': round(gen_stats.get('avg_output_words', 0), 1),
+              'max_output_words': gen_stats.get('max_output_words', 0),
               'num_prompts': gen_stats['num_prompts'],
               'notes': args.notes,
               **all_metrics}
@@ -584,6 +641,8 @@ if __name__ == "__main__":
             output_writer = get_output_writer(out_path, OutputFormat(args.output_format), 'w',
                                                 max_hits=args.retrieval_num, tag=args.retrieval_method, topics=topics, )
             write_run(output_writer, reranked_results, args)
+            # Save complete prompt/response details
+            save_detailed_results(reranked_results, args, dataset, wandb_run=wandb_run)
             gen_stats = compute_generation_stats(reranked_results)
             ds_metrics = evaluate_results(args, dataset, out_path, qrels, time_cost=total_time_cost, current_pass=pass_ct+1,
                                           gen_stats=gen_stats, wandb_run=wandb_run)
