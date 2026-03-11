@@ -82,8 +82,7 @@ for ((i=0; i<NUM_INSTANCES; i++)); do
         --retrieval_num 100 \
         --num_passes 1 \
         --reasoning_maxlen 3072 \
-        --retrieval_method reasonir \
-        --use_gpt4cot_retrieval True \
+        --retrieval_method e5-mistral-7b-instruct \
         --datasets ${DATASETS_STR} \
         --shuffle_candidates False \
         --prompt_mode ${PROMPT_MODE} \
