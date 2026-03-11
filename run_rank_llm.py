@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Union, Optional, Sequence
 from data import Query, Request, Candidate
 import torch
 from enum import Enum
-from rerank.api_keys import get_openai_api_key
+from rerank.api_keys import get_openai_api_key, get_api_key_and_base
 from rerank.rank_gpt import SafeOpenai
 from rerank.rank_listwise_os_llm import RankListwiseOSLLM
 from rerank.rankllm import PromptMode, RankLLM
@@ -167,6 +167,7 @@ class Arguments:
     vllm_batched: bool = field(default=False, metadata={'help': 'Whether to run the model in batches.'})
     prompt_mode: PromptMode = field(default=PromptMode.RANK_GPT, metadata={'required': True, 'choices': list(PromptMode)})
     prompt_info_path: str = field(default=f'{PROJECT_DIR}/listwise_prompt_r1.toml')
+    disable_prefix_caching: bool = field(default=False, metadata={'help': 'Disable vLLM prefix caching (needed for some multimodal models like DeepSeek-OCR)'})
     notes: str = field(default='', metadata={'help': 'notes for code running'})
 
     # wandb arguments
@@ -515,7 +516,9 @@ if __name__ == "__main__":
                 write_run(output_writer, results, args)
         dataset_results[dataset] = results
     ############################# load LLM reranker #############################
-    if args.model_path in ['gpt-4o-mini-2024-07-18', 'gpt-4o-mini', 'gpt-4o-2024-08-06', 'gpt-4o-2024-05-13', 'gpt-4o', 'deepseek-chat', 'deepseek-reasoner']:
+    API_MODELS = ['gpt-4o-mini-2024-07-18', 'gpt-4o-mini', 'gpt-4o-2024-08-06', 'gpt-4o-2024-05-13', 'gpt-4o', 'deepseek-chat', 'deepseek-reasoner']
+    if args.model_path in API_MODELS:
+        api_key, api_base_url = get_api_key_and_base(args.model_path)
         agent = SafeOpenai(
             args=args,
             model=args.model_path,
@@ -524,7 +527,8 @@ if __name__ == "__main__":
             prompt_mode=args.prompt_mode,
             window_size=args.window_size,
             prompt_info_path=args.prompt_info_path,
-            keys=get_openai_api_key(resource=args.api_resource, model_name=args.model_path),
+            keys=api_key,
+            api_base_url=api_base_url,
         )
     else:
         print(f"Loading {args.model_path} ...")

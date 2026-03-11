@@ -86,16 +86,22 @@ class RankListwiseOSLLM(RankLLM):
             raise ImportError("Please install rank-llm with `pip install rank-llm[vllm]` to use batch inference.")
         elif vllm_batched:
             if 'GPTQ' in model:
-                self._llm = LLM(model, quantization="gptq", download_dir=os.getenv("HF_HOME"), gpu_memory_utilization=0.85, enforce_eager=False, tensor_parallel_size=num_gpus)
+                self._llm = LLM(model, quantization="gptq", download_dir=os.getenv("HF_HOME"), gpu_memory_utilization=0.85, enforce_eager=False, tensor_parallel_size=num_gpus, trust_remote_code=True)
             else:
-                self._llm = LLM(model, 
-                                enable_lora=True if args.lora_path is not None else False,
-                                max_lora_rank=args.max_lora_rank,
-                                download_dir=os.getenv("HF_HOME"), 
-                                gpu_memory_utilization=0.9, 
-                                enforce_eager=False, 
-                                tensor_parallel_size=num_gpus
-                                )
+                llm_kwargs = dict(
+                    model=model,
+                    enable_lora=True if args.lora_path is not None else False,
+                    max_lora_rank=args.max_lora_rank,
+                    download_dir=os.getenv("HF_HOME"),
+                    gpu_memory_utilization=0.9,
+                    enforce_eager=False,
+                    tensor_parallel_size=num_gpus,
+                    trust_remote_code=True,
+                )
+                # Multimodal models (e.g., DeepSeek-OCR) need prefix caching disabled
+                if getattr(args, 'disable_prefix_caching', False):
+                    llm_kwargs['enable_prefix_caching'] = False
+                self._llm = LLM(**llm_kwargs)
             self._tokenizer = self._llm.get_tokenizer()
         else:
             if 'GPTQ' in model:

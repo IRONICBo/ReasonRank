@@ -38,6 +38,7 @@ class SafeOpenai(RankLLM):
         api_base: str = None,
         api_version: str = None,
         max_passage_length: int = 100,
+        api_base_url: str = None,
     ) -> None:
         """
         Creates instance of the SafeOpenai class, a specialized version of RankLLM designed for safely handling OpenAI API calls with
@@ -58,6 +59,7 @@ class SafeOpenai(RankLLM):
         - api_type (str, optional): The type of API service, if using Azure AI as the backend.
         - api_base (str, optional): The base URL for the API, applicable when using Azure AI.
         - api_version (str, optional): The API version, necessary for Azure AI integration.
+        - api_base_url (str, optional): The base URL for API calls (e.g., https://api.deepseek.com for DeepSeek).
 
         Raises:
         - ValueError: If an unsupported prompt mode is provided or if no OpenAI API keys / invalid OpenAI API keys are supplied.
@@ -71,6 +73,7 @@ class SafeOpenai(RankLLM):
             keys = [keys]
         if not keys:
             raise ValueError("Please provide OpenAI Keys.")
+        self._api_base_url = api_base_url
         if prompt_mode not in [
             str(PromptMode.RANK_GPT),
             str(PromptMode.RANK_GPT_reasoning),
@@ -107,13 +110,15 @@ class SafeOpenai(RankLLM):
 
     @retry(wait=wait_random_exponential(min=1, max=60), stop=stop_after_attempt(6))
     def req(self, model_name, messages, max_tokens):
-        client = OpenAI(api_key=openai.api_key)
+        client_kwargs = {"api_key": openai.api_key}
+        if hasattr(self, '_api_base_url') and self._api_base_url:
+            client_kwargs["base_url"] = self._api_base_url
+        client = OpenAI(**client_kwargs)
         completion = client.chat.completions.create(
             model=model_name,
             messages=messages,
             max_tokens=max_tokens
         )
-        # response = completion.choices[0].message.content
         return completion
 
 
